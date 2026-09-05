@@ -18,6 +18,15 @@ fi
 
 pass=0; fail=0
 work="$(mktemp -d)"
+# If this fails, $work is empty, every path below becomes "/something", the
+# writes fail, and several assertions still come back green because the guard
+# fails open on a missing stub. A suite that can report success while its own
+# scratch space does not exist is proving nothing. Stop instead.
+[ -n "$work" ] && [ -d "$work" ] || {
+  echo "could not create a temporary directory - refusing to run a suite that" >&2
+  echo "would report passes it did not earn." >&2
+  exit 1
+}
 trap 'rm -rf "$work"' EXIT
 
 # configure <branches> <mode> -> echoes path to a hook built with that config
@@ -112,6 +121,52 @@ check "blocks weird.xyz (unknown extension)"   "$BLOCK" "$(probe "$h3" "$rs/weir
 check "still allows README.md"                 "$ALLOW" "$(probe "$h3" "$rs/README.md")"
 check "still allows config.yaml"               "$ALLOW" "$(probe "$h3" "$rs/config.yaml")"
 check "still allows logo.png"                  "$ALLOW" "$(probe "$h3" "$rs/logo.png")"
+
+printf '\n%sship-guard: the merge gate%s\n' "$bold" "$reset"
+SHIP_SRC="$here/../hook/ship-guard.sh"
+if [ ! -f "$SHIP_SRC" ]; then
+  check "hook/ship-guard.sh exists" ok missing
+else
+  # Stub checkers stand in for the real one: no network, no pull requests. What
+  # is under test is the guard's decision, not the checker's arithmetic.
+  stub() { printf '#!/bin/sh\ncat <<'\''J'\''\n%s\nJ\n' "$2" > "$1"; chmod +x "$1"; }
+  stub "$work/stub-hit"    '{"conflicts":[{"kind":"pr","number":7,"branch":"other","url":"http://x/7","files":["a.ts","b.py"]}]}'
+  stub "$work/stub-clean"  '{"conflicts":[]}'
+  stub "$work/stub-wt"     '{"conflicts":[{"kind":"worktree","path":"/tmp/w","branch":"o","files":["a.ts"]}]}'
+  stub "$work/stub-broken" 'not json at all'
+
+  sprobe() {  # sprobe <checker> <command> -> exit code
+    local rc=0
+    printf '{"tool_input":{"command":"%s"},"cwd":"%s"}' "$2" "$work" \
+      | SHIP_GUARD_CHECKER="$1" "$SHIP_SRC" >/dev/null 2>&1 || rc=$?
+    printf '%s' "$rc"
+  }
+
+  check "blocks a merge that overlaps an open request" \
+    "$BLOCK" "$(sprobe "$work/stub-hit" "gh pr merge 7 --squash")"
+  check "allows a merge with nothing in its way" \
+    "$ALLOW" "$(sprobe "$work/stub-clean" "gh pr merge 7 --squash")"
+  check "ignores ordinary commands entirely" \
+    "$ALLOW" "$(sprobe "$work/stub-hit" "ls -la")"
+  check "ignores a command that only reads history" \
+    "$ALLOW" "$(sprobe "$work/stub-hit" "git log --oneline")"
+  # A merge cannot race work nobody has pushed, so there is nothing to wait for.
+  check "allows when only an unsubmitted worktree overlaps" \
+    "$ALLOW" "$(sprobe "$work/stub-wt" "gh pr merge 7 --squash")"
+  # Fails open deliberately: the merge being guarded is itself a gh call, so a
+  # broken checker cannot wave a bad merge through - there would be no merge.
+  check "fails open when the checker is broken" \
+    "$ALLOW" "$(sprobe "$work/stub-broken" "gh pr merge 7 --squash")"
+  check "fails open when the checker is missing" \
+    "$ALLOW" "$(sprobe "$work/no-such-checker" "gh pr merge 7 --squash")"
+
+  smsg="$(printf '{"tool_input":{"command":"gh pr merge 7"},"cwd":"%s"}' "$work" \
+    | SHIP_GUARD_CHECKER="$work/stub-hit" "$SHIP_SRC" 2>&1 >/dev/null)"
+  case "$smsg" in *"#7"*) check "names the blocking request" ok ok ;;
+                  *) check "names the blocking request" ok missing ;; esac
+  case "$smsg" in *"a.ts"*) check "names a shared file" ok ok ;;
+                  *) check "names a shared file" ok missing ;; esac
+fi
 
 printf '\n%sthe denial message is actually useful%s\n' "$bold" "$reset"
 msg="$(printf '{"tool_input":{"file_path":"%s"}}' "$r/app.ts" | "$h" 2>&1 >/dev/null)"

@@ -14,7 +14,7 @@ set -euo pipefail
 
 REPO="https://github.com/ShakhzodbekBabakulov/worktree-guard"
 # Overridable so forks — and this repo's own tests — can point at another source.
-RAW="${WG_HOOK_URL:-https://raw.githubusercontent.com/ShakhzodbekBabakulov/worktree-guard/main/hook/worktree-guard.sh}"
+RAW_BASE="${WG_HOOK_BASE_URL:-https://raw.githubusercontent.com/ShakhzodbekBabakulov/worktree-guard/main/hook}"
 
 bold=""; dim=""; red=""; green=""; reset=""
 if [ -t 1 ]; then
@@ -99,12 +99,16 @@ done
 
 if [ "$scope" = "project" ]; then
   claude_dir="$repo_root/.claude"
-  hook_command='"$CLAUDE_PROJECT_DIR/.claude/hooks/worktree-guard.sh"'
+  hook_dir_ref='$CLAUDE_PROJECT_DIR/.claude/hooks'
 else
   claude_dir="$HOME/.claude"
-  hook_command='"$HOME/.claude/hooks/worktree-guard.sh"'
+  hook_dir_ref='$HOME/.claude/hooks'
 fi
+hook_command="\"$hook_dir_ref/worktree-guard.sh\""
+ship_command="\"$hook_dir_ref/ship-guard.sh\""
 hook_path="$claude_dir/hooks/worktree-guard.sh"
+ship_path="$claude_dir/hooks/ship-guard.sh"
+checker_path="$claude_dir/hooks/session-conflict-check"
 settings_path="$claude_dir/settings.json"
 
 # ─── 2. protected branches ──────────────────────────────────────────────────
@@ -148,21 +152,56 @@ while [ -z "$mode" ]; do
   esac
 done
 
+# ─── 4. the merge gate ──────────────────────────────────────────────────────
+# Only worth offering if `gh` is around: the gate reads open pull requests, and
+# the command it guards is itself a gh command.
+want_ship="no"
+if command -v gh >/dev/null 2>&1; then
+  say ""
+  say "  ${bold}Also stop parallel sessions merging over each other?${reset}"
+  say ""
+  say "    ${dim}When two agents work at once, whichever merges second merges onto${reset}"
+  say "    ${dim}a main branch it never saw — and nothing tells you. ship-guard${reset}"
+  say "    ${dim}refuses a \`gh pr merge\` while another OPEN pull request changes${reset}"
+  say "    ${dim}the same files. It runs only on merges, so it costs nothing${reset}"
+  say "    ${dim}the rest of the time.${reset}"
+  say ""
+  while :; do
+    ask "  Install it? [Y/n]: " "y"; choice="$ANSWER"
+    case "$choice" in
+      y|Y|yes|Yes) want_ship="yes"; break ;;
+      n|N|no|No)   want_ship="no";  break ;;
+      *) say "  ${red}Enter y or n.${reset}" ;;
+    esac
+  done
+fi
+
 # ─── fetch the hook template ────────────────────────────────────────────────
 # Running from a clone? Use the local file. Piped through bash? BASH_SOURCE
 # isn't a real path, so fall back to downloading it.
-template=""
 src_dir=""
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
   src_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
-if [ -n "$src_dir" ] && [ -f "$src_dir/hook/worktree-guard.sh" ]; then
-  template="$(cat "$src_dir/hook/worktree-guard.sh")"
-else
-  command -v curl >/dev/null 2>&1 || die "need curl to download the hook (or run this from a clone)."
-  template="$(curl -fsSL "$RAW")" || die "couldn't download the hook from $RAW"
-fi
-[ -n "$template" ] || die "the hook template came back empty."
+
+# Answer lands in $FETCHED, for the same subshell reason `ask` uses $ANSWER:
+# `die` inside $(...) would only kill the subshell.
+FETCHED=""
+fetch_hook() {
+  local name="$1"
+  if [ -n "$src_dir" ] && [ -f "$src_dir/hook/$name" ]; then
+    FETCHED="$(cat "$src_dir/hook/$name")"
+  else
+    command -v curl >/dev/null 2>&1 || die \
+      "need curl to download $name (or run this from a clone)."
+    FETCHED="$(curl -fsSL "$RAW_BASE/$name")" || die \
+      "couldn't download $name from $RAW_BASE/$name"
+  fi
+  [ -n "$FETCHED" ] || die "$name came back empty."
+}
+
+fetch_hook worktree-guard.sh
+template="$FETCHED"
 
 # ─── write the hook, with the answers baked in ──────────────────────────────
 mkdir -p "$claude_dir/hooks"
@@ -184,11 +223,10 @@ mv "$hook_path.tmp" "$hook_path"
 chmod +x "$hook_path"
 
 # ─── merge into settings.json ───────────────────────────────────────────────
-merge_result="$(python3 -c '
+MERGE_PY='
 import json, os, shutil, sys
 
-path, command = sys.argv[1], sys.argv[2]
-MATCHER = "Edit|Write|NotebookEdit"
+path, command, MATCHER, MARKER, IF_FILTER = sys.argv[1:6]
 
 data = {}
 backed_up = ""
@@ -204,7 +242,11 @@ if os.path.exists(path):
                 "I will not touch it — fix it, or add the hook by hand.\n" % (path, e))
             sys.exit(1)
         backed_up = path + ".worktree-guard-backup"
-        shutil.copy2(path, backed_up)
+        # Only the first time. A second merge in the same run must not overwrite
+        # the backup with a copy of the half-merged file - that is the one state
+        # nobody wants to roll back to.
+        if not os.path.exists(backed_up):
+            shutil.copy2(path, backed_up)
 
 if not isinstance(data, dict):
     sys.stderr.write("%s does not contain a JSON object at the top level.\n" % path)
@@ -220,13 +262,20 @@ if not isinstance(pre, list):
     sys.stderr.write("hooks.PreToolUse in %s is not a list. Refusing to guess.\n" % path)
     sys.exit(1)
 
-entry = {"matcher": MATCHER, "hooks": [{"type": "command", "command": command}]}
+hook_obj = {"type": "command", "command": command}
+if IF_FILTER:
+    # Narrow the hook to the one command it guards, so it costs nothing on the
+    # thousands of shell calls it has no opinion about.
+    hook_obj["if"] = IF_FILTER
+    hook_obj["timeout"] = 120
+    hook_obj["statusMessage"] = "Checking for conflicting sessions"
+entry = {"matcher": MATCHER, "hooks": [hook_obj]}
 
 def is_ours(e):
     if not isinstance(e, dict):
         return False
     for h in e.get("hooks", []) or []:
-        if isinstance(h, dict) and "worktree-guard" in str(h.get("command", "")):
+        if isinstance(h, dict) and MARKER in str(h.get("command", "")):
             return True
     return False
 
@@ -255,11 +304,33 @@ with open(tmp, "w", encoding="utf-8") as f:
 os.replace(tmp, path)
 
 print("%s\t%d\t%s" % ("updated" if replaced else "added", kept, backed_up))
-' "$settings_path" "$hook_command")" || die "couldn't merge into $settings_path — nothing was changed."
+'
+
+merge_result="$(python3 -c "$MERGE_PY" \
+  "$settings_path" "$hook_command" "Edit|Write|NotebookEdit" "worktree-guard" "")" \
+  || die "couldn't merge into $settings_path — nothing was changed."
 
 merge_action="$(printf '%s' "$merge_result" | cut -f1)"
 merge_kept="$(printf '%s' "$merge_result" | cut -f2)"
 merge_backup="$(printf '%s' "$merge_result" | cut -f3)"
+
+# ─── the merge gate, if it was wanted ───────────────────────────────────────
+# Two files: the hook Claude Code calls, and the checker it leans on. The
+# checker is also useful on its own — run it any time to see who else is
+# touching your files — so it is installed as a normal executable, not hidden.
+if [ "$want_ship" = "yes" ]; then
+  fetch_hook ship-guard.sh
+  printf '%s' "$FETCHED" > "$ship_path.tmp" && mv "$ship_path.tmp" "$ship_path"
+  chmod +x "$ship_path"
+
+  fetch_hook session-conflict-check
+  printf '%s' "$FETCHED" > "$checker_path.tmp" && mv "$checker_path.tmp" "$checker_path"
+  chmod +x "$checker_path"
+
+  python3 -c "$MERGE_PY" \
+    "$settings_path" "$ship_command" "Bash" "ship-guard" "Bash(gh pr merge*)" \
+    >/dev/null || die "couldn't add the merge gate to $settings_path."
+fi
 
 # ─── prove it actually works ────────────────────────────────────────────────
 # An installer that says "done" without testing is indistinguishable from one
@@ -287,6 +358,31 @@ fails=""
 git -C "$t" checkout -q -b wg-selftest-branch
 [ "$(probe "$t/app.ts")" = "0" ] || fails="$fails\n    - wrongly blocked app.ts on a feature branch"
 
+# Same rule for the merge gate: prove it refuses AND prove it lets things
+# through. Stub checkers stand in for the real one so the test needs no network
+# and no pull requests of its own.
+if [ "$want_ship" = "yes" ]; then
+  printf '#!/bin/sh\necho %s\n' \
+    "'{\"conflicts\":[{\"kind\":\"pr\",\"number\":1,\"branch\":\"other\",\"files\":[\"a.ts\"]}]}'" \
+    > "$t/stub-hit"
+  printf '#!/bin/sh\necho %s\n' "'{\"conflicts\":[]}'" > "$t/stub-clean"
+  chmod +x "$t/stub-hit" "$t/stub-clean"
+
+  ship_probe() {
+    local checker="$1" cmd="$2" rc=0
+    printf '{"tool_input":{"command":"%s"},"cwd":"%s"}' "$cmd" "$t" \
+      | SHIP_GUARD_CHECKER="$checker" "$ship_path" >/dev/null 2>&1 || rc=$?
+    printf '%s' "$rc"
+  }
+
+  [ "$(ship_probe "$t/stub-hit" "gh pr merge 1 --squash")" = "2" ] \
+    || fails="$fails\n    - did NOT block a merge that overlaps an open request"
+  [ "$(ship_probe "$t/stub-clean" "gh pr merge 1 --squash")" = "0" ] \
+    || fails="$fails\n    - wrongly blocked a merge with nothing in its way"
+  [ "$(ship_probe "$t/stub-hit" "ls -la")" = "0" ] \
+    || fails="$fails\n    - interfered with an ordinary command"
+fi
+
 if [ -n "$fails" ]; then
   say ""
   say "  ${red}${bold}Self-test FAILED.${reset} The hook is installed but is not behaving:"
@@ -310,8 +406,17 @@ if [ "$merge_kept" -gt 0 ]; then
 fi
 [ -n "$merge_backup" ] && say "  ${green}✓${reset} backup  ${dim}$merge_backup${reset}"
 say "  ${green}✓${reset} self-test: blocks code on ${bold}$first_branch${reset}, allows it on a branch, leaves docs alone"
+if [ "$want_ship" = "yes" ]; then
+  say "  ${green}✓${reset} wrote  ${dim}$ship_path${reset}"
+  say "  ${green}✓${reset} wrote  ${dim}$checker_path${reset}"
+  say "  ${green}✓${reset} self-test: refuses a merge that overlaps an open request, allows one that doesn't"
+fi
 say ""
 say "  ${bold}Protected:${reset} $branches"
+if [ "$want_ship" = "yes" ]; then
+  say "  ${bold}Merge gate:${reset} on — see who else is in your files any time with"
+  say "  ${dim}  $checker_path${reset}"
+fi
 if [ "$scope" = "project" ]; then
   say "  ${dim}Commit .claude/ to share the guard with your team.${reset}"
 fi

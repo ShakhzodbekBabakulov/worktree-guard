@@ -1,6 +1,14 @@
 # worktree-guard
 
-**Keep coding agents off your main branch.**
+**Keep coding agents off your main branch — and out of each other's way.**
+
+Two hooks, one installer. The first stops an agent editing `main`. The second,
+[`ship-guard`](#ship-guard--the-merge-gate), stops two agents landing
+conflicting work on it. Take either, or both.
+
+---
+
+## worktree-guard — the branch guard
 
 Claude Code will edit `main` without a second thought. You asked a question, it
 answered by changing three files, and now your main branch has uncommitted work
@@ -26,11 +34,71 @@ The agent reads that and starts a worktree. Usually without asking you.
 
 ---
 
+## ship-guard — the merge gate
+
+The second problem shows up the moment you run more than one agent at a time.
+
+Two sessions, two branches, two pull requests. Whichever merges second merges
+onto a `main` branch it has never seen — its tests passed against different
+code, and nothing tells anybody. You find out later, from the bug.
+
+`ship-guard` refuses a `gh pr merge` while **another open pull request changes
+the same files**:
+
+```
+BLOCKED by ship-guard: another open pull request changes the same files.
+
+  pull request #491 (worktree-e1-paddle)
+    https://github.com/you/repo/pull/491
+    also changes backend/api/payments.py
+
+It was submitted before yours, so it lands first. Merging now would merge onto
+a main branch you have not seen, and nothing would tell you afterwards.
+
+What to do:
+  1. Wait for that request to merge.
+  2. Then pull it in:  git fetch origin && git merge origin/main
+  3. Re-run your checks - your code changed when theirs landed.
+  4. Merge.
+```
+
+It hooks `Bash`, narrowed with `"if": "Bash(gh pr merge*)"`, so it runs **only**
+on an actual merge. Every other shell command skips it entirely.
+
+### The checker is useful on its own
+
+```sh
+~/.claude/hooks/session-conflict-check
+```
+
+Read-only, always exits `0`, prints JSON. Run it any time to see who else is in
+your files. It separates two collisions that need opposite responses:
+
+| kind | what it means | what you can do |
+|---|---|---|
+| `pr` | another **open** pull request shares a file | **wait** — it was submitted, it will land |
+| `worktree` | another **local** worktree shares a file, unsubmitted | **cannot wait** — nobody has pushed it; a human has to finish that session |
+
+Only `pr` blocks a merge. You cannot race something that was never pushed.
+
+If `gh` cannot answer, `"gh_ok"` is `false` and `"warnings"` says why — an empty
+conflict list then means *"I don't know"*, not *"all clear"*. Read the flag.
+
+### Why it fails open
+
+If the checker cannot reach GitHub, the merge is allowed. Not optimism: the
+merge being guarded is itself a `gh` call against the same API. No GitHub means
+no merge either way, so refusing would block nothing and only produce a
+confusing error.
+
+---
+
 ## Install
 
-The installer asks three questions, merges itself into your `settings.json`
-without disturbing hooks you already have, and **proves the guard actually fires
-before it claims success.**
+The installer asks four questions, merges itself into your `settings.json`
+without disturbing hooks you already have, and **proves the guards actually fire
+before it claims success.** The fourth question — the merge gate — is only asked
+if `gh` is on your PATH, since that is what it reads.
 
 ```sh
 git clone https://github.com/ShakhzodbekBabakulov/worktree-guard
@@ -78,6 +146,16 @@ Other limits, stated plainly:
   guard should cost you a missed catch, not your ability to work. The installer
   checks its dependencies and self-tests precisely so a silently-dead hook
   doesn't survive installation.
+
+And the merge gate has limits of its own, worth stating plainly:
+
+- **It only knows about pull requests and local worktrees.** A collaborator
+  working on another machine who has not pushed is invisible to it.
+- **It compares file paths, not meaning.** Two changes to the same file may not
+  actually conflict, and two changes to different files sometimes do. It errs
+  towards making you look.
+- **It guards `gh pr merge`.** Merging through the GitHub web page, or with
+  `git push` straight to main, goes around it. Same tripwire-not-sandbox rule.
 
 ---
 
@@ -133,6 +211,8 @@ extension-less files like `Makefile` and `Dockerfile`.
   if you have git, you have it. (`jq` would be the obvious alternative, but it
   carries no such guarantee.)
 - `bash`
+- `gh` — **only** for the merge gate. Without it the installer does not offer
+  the gate at all; the branch guard needs nothing beyond the three above.
 
 ---
 
@@ -140,6 +220,8 @@ extension-less files like `Makefile` and `Dockerfile`.
 
 ```sh
 rm ~/.claude/hooks/worktree-guard.sh          # or <repo>/.claude/hooks/…
+rm ~/.claude/hooks/ship-guard.sh              # if you installed the merge gate
+rm ~/.claude/hooks/session-conflict-check
 ```
 
 Then drop the `worktree-guard` entry from `hooks.PreToolUse` in the matching
@@ -170,10 +252,16 @@ terminal happens to be sitting in.
 ./test/selftest.sh
 ```
 
-23 assertions, and every axis is tested in **both** directions — that it blocks
+32 assertions, and every axis is tested in **both** directions — that it blocks
 what it should, and that it allows what it should. A suite that only checked
 "does it block?" would pass with flying colours on a hook that blocks
 everything, which is worse than having no hook at all.
+
+The suite also refuses to run if it cannot create its own scratch directory.
+That check exists because it was needed: on a machine where `mktemp -d` was
+denied, several assertions came back green while the directory did not exist —
+a missing stub makes the guard fail open, which reads as a pass. A suite that
+can report passes it did not earn is worse than no suite.
 
 ---
 
