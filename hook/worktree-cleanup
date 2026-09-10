@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Remove one proven-merged feature worktree/branch, preserving newer work."""
+import argparse
+import os
+from pathlib import Path
+from worktree_common import (Stop, ancestor, base_branch, clean, entry, gh_json,
+                             git, ref, remote_tip, root, run, trees)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    select = ap.add_mutually_exclusive_group()
+    select.add_argument('--worktree', help='finished worktree, including a subdirectory')
+    select.add_argument('--branch', help='specific leftover local branch')
+    ap.add_argument('--dry-run', action='store_true', help='read-only preview; requires current fetched refs')
+    opts = ap.parse_args()
+    here = root(opts.worktree or os.getcwd())
+    registered = trees(here)
+    primary = Path(registered[0]['worktree']).resolve()
+    branch = opts.branch or git(here, 'branch', '--show-current')
+    base = base_branch(here)
+    if not branch or branch in {base, 'main', 'master'}:
+        raise Stop('Select a finished feature branch; the default branch and detached checkouts are protected.')
+    git(here, 'check-ref-format', '--branch', branch)
+    tip = ref(here, 'refs/heads/' + branch)
+    matches = [t for t in registered if t.get('branch') == 'refs/heads/' + branch]
+    if len(matches) > 1:
+        raise Stop('This branch is used in multiple worktrees; finish those sessions first.')
+    target_info = matches[0] if matches else None
+    target = Path(target_info['worktree']).resolve() if target_info else None
+    if target_info and ('locked' in target_info or 'prunable' in target_info):
+        raise Stop('The worktree is locked or missing; resolve its state before cleanup.')
+    if target:
+        clean(target, ignored=(target != primary))
+        if any(Path(t['worktree']).resolve().is_relative_to(target) and
+               Path(t['worktree']).resolve() != target for t in registered):
+            raise Stop('Another worktree is nested in this directory.')
+    base_trees = [Path(t['worktree']).resolve() for t in registered
+                  if t.get('branch') == 'refs/heads/' + base]
+    if not base_trees and target != primary:
+        raise Stop('No checkout is on the default branch; switch the primary checkout first.')
+    destination = base_trees[0] if base_trees else primary
+    clean(destination)
+    local_base = ref(here, 'refs/heads/' + base)
+
+    # Honor a differently named origin upstream.
+    tracking = git(here, 'for-each-ref', '--format=%(upstream:remotename)%09%(upstream:remoteref)',
+                   'refs/heads/' + branch).split('\t')
+    remote_branch = branch
+    if len(tracking) == 2 and tracking[0]:
+        if tracking[0] != 'origin' or not tracking[1].startswith('refs/heads/'):
+            raise Stop('This branch tracks a different remote; cleanup supports origin only.')
+        remote_branch = tracking[1].removeprefix('refs/heads/')
+    if remote_branch in {base, 'main', 'master'}:
+        raise Stop('The feature branch tracks a protected remote branch. Fix its upstream first.')
+
+    if not opts.dry_run:
+        git(here, 'fetch', '--prune', 'origin')
+    base_tip = ref(here, 'refs/remotes/origin/' + base)
+    if remote_tip(here, base) != base_tip:
+        raise Stop('The remote base changed; fetch origin and retry before cleanup.')
+    if not ancestor(here, local_base, base_tip):
+        raise Stop('The local default branch has unpublished/divergent commits; it cannot fast-forward.')
+    if not ancestor(here, tip, base_tip):
+        pr = gh_json(here, 'pr', 'view', remote_branch, '--json',
+                     'state,headRefOid,headRefName,baseRefName,mergeCommit,isCrossRepository,number,url')
+        merged = pr.get('mergeCommit') or {}
+        if (pr.get('state') != 'MERGED' or pr.get('headRefOid') != tip or
+                pr.get('headRefName') != remote_branch or pr.get('baseRefName') != base or
+                pr.get('isCrossRepository') is not False or not merged.get('oid') or
+                not ancestor(here, merged['oid'], base_tip)):
+            raise Stop('The latest branch tip is not proven merged into the remote default branch.')
+    remote_head = remote_tip(here, remote_branch)
+    if remote_head and remote_head != tip:
+        raise Stop('The remote feature branch contains a different tip; preserve it for review.')
+
+    print('Default checkout: ' + str(destination))
+    print('Remove folder: ' + (str(target) if target and target != primary else '(none; primary folder is preserved)'))
+    print('Remove local branch: ' + branch)
+    print('Remove remote branch: ' + ('origin/' + remote_branch if remote_head else '(already absent)'))
+    if opts.dry_run:
+        print('Preview only; nothing changed.')
+        return
+
+    os.chdir(destination)
+    # Recheck local state just before mutations. Never force-remove a worktree.
+    if ref(here, 'refs/heads/' + branch) != tip:
+        raise Stop('The local feature branch changed during inspection.')
+    if target:
+        clean(target, ignored=(target != primary))
+    clean(destination)
+    if target == primary:
+        git(primary, 'switch', '--no-overwrite-ignore', base)
+    git(destination, 'merge', '--no-overwrite-ignore', '--ff-only', base_tip)
+    print('Updated default checkout.')
+    if remote_head:
+        # Conditional deletion: reject if another session pushed after inspection.
+        git(destination, 'push', '--force-with-lease=refs/heads/%s:%s' % (remote_branch, remote_head),
+            'origin', ':refs/heads/' + remote_branch)
+        print('Removed remote branch: ' + remote_branch)
+    if target and target != primary:
+        # Resolve ignored/untracked changes again; Git itself rechecks tracked files.
+        clean(target, ignored=True)
+        current = [t for t in trees(destination)
+                   if Path(t['worktree']).resolve() == target]
+        if (len(current) != 1 or current[0].get('branch') != 'refs/heads/' + branch or
+                current[0].get('HEAD') != tip or 'locked' in current[0] or
+                'prunable' in current[0] or git(target, 'branch', '--show-current') != branch or
+                ref(target, 'HEAD') != tip or ref(destination, 'refs/heads/' + branch) != tip):
+            raise Stop('The selected workspace or feature branch changed during cleanup; its folder was preserved.')
+        git(destination, 'worktree', 'remove', str(target))
+        print('Removed folder: ' + str(target))
+    if any(t.get('branch') == 'refs/heads/' + branch for t in trees(destination)):
+        raise Stop('Another worktree now uses the branch; local branch was preserved.')
+    # Compare-and-delete protects any commit made after the earlier proof.
+    git(destination, 'update-ref', '-d', 'refs/heads/' + branch, tip)
+    config = run(['git', 'config', '--remove-section', 'branch.' + branch], destination, False)
+    if config.returncode not in (0, 128):
+        raise Stop('The branch was removed, but its tracking configuration could not be cleared: ' + config.stderr)
+    print('Removed local branch: ' + branch)
+    git(destination, 'fetch', '--prune', 'origin')
+    if remote_tip(destination, remote_branch):
+        raise Stop('The remote branch was recreated during cleanup; it was preserved.')
+    print('Verified cleanup. Continue in: ' + str(destination))
+
+
+if __name__ == '__main__':
+    entry(main)

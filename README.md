@@ -1,270 +1,210 @@
 # worktree-guard
 
-**Keep coding agents off your main branch — and out of each other's way.**
+One workflow for Claude Code and Codex: **`/work` → `/push` → `/ship` → `/done`**.
+The four commands share Python helpers and a built-in review checklist. No other
+workflow package or personal configuration is required.
 
-Two hooks, one installer. The first stops an agent editing `main`. The second,
-[`ship-guard`](#ship-guard--the-merge-gate), stops two agents landing
-conflicting work on it. Take either, or both.
+## Workflow
 
----
+| Command | Behavior |
+| --- | --- |
+| `/work <name>` | Resume a matching workspace or branch first; otherwise start isolated work from the remote default branch. Prefer native app transitions, verify the actual working location, preserve unsaved work, and follow project setup instructions. |
+| `/push` | Review requirements and code, run project checks, save intended work, update from the review base/default branch, retest, push the feature branch, and create/update its pull request. Return an evidenced preview when available. Never merge. |
+| `/ship` | Perform the push stage automatically for missing reviews or unsaved/unuploaded work. Check overlap, update and retest, merge the exact tested head, then verify configured deployments against the released commit. Leave cleanup to `/done`. |
+| `/done` | Prove the latest feature tip was merged, safely update the default checkout, and remove only the selected finished workspace and local/remote feature branches. Report each completed step. |
 
-## worktree-guard — the branch guard
-
-Claude Code will edit `main` without a second thought. You asked a question, it
-answered by changing three files, and now your main branch has uncommitted work
-in it that you didn't plan and can't cleanly review.
-
-`worktree-guard` refuses those edits. Source files on a protected branch are
-blocked; the agent is told to go make a worktree. Markdown, JSON and config stay
-editable — because thinking, planning and note-taking on `main` are fine. It's
-the *coding* that belongs on a branch.
-
-```
-BLOCKED by worktree-guard: 'app.ts' is source, and you're on protected branch 'main'.
-
-Code belongs on a feature branch — ideally an isolated worktree:
-    git worktree add ../wt-<name> -b <name>     # separate folder + branch
-    git checkout -b <name>                      # or just a branch, in place
-(If you have the EnterWorktree tool, that does the same in one step.)
-
-Markdown, JSON and config are still editable here — plan freely on 'main'.
-```
-
-The agent reads that and starts a worktree. Usually without asking you.
-
----
-
-## ship-guard — the merge gate
-
-The second problem shows up the moment you run more than one agent at a time.
-
-Two sessions, two branches, two pull requests. Whichever merges second merges
-onto a `main` branch it has never seen — its tests passed against different
-code, and nothing tells anybody. You find out later, from the bug.
-
-`ship-guard` refuses a `gh pr merge` while **another open pull request changes
-the same files**:
-
-```
-BLOCKED by ship-guard: another open pull request changes the same files.
-
-  pull request #491 (worktree-e1-paddle)
-    https://github.com/you/repo/pull/491
-    also changes backend/api/payments.py
-
-It was submitted before yours, so it lands first. Merging now would merge onto
-a main branch you have not seen, and nothing would tell you afterwards.
-
-What to do:
-  1. Wait for that request to merge.
-  2. Then pull it in:  git fetch origin && git merge origin/main
-  3. Re-run your checks - your code changed when theirs landed.
-  4. Merge.
-```
-
-It hooks `Bash`, narrowed with `"if": "Bash(gh pr merge*)"`, so it runs **only**
-on an actual merge. Every other shell command skips it entirely.
-
-### The checker is useful on its own
-
-```sh
-~/.claude/hooks/session-conflict-check
-```
-
-Read-only, always exits `0`, prints JSON. Run it any time to see who else is in
-your files. It separates two collisions that need opposite responses:
-
-| kind | what it means | what you can do |
-|---|---|---|
-| `pr` | another **open** pull request shares a file | **wait** — it was submitted, it will land |
-| `worktree` | another **local** worktree shares a file, unsubmitted | **cannot wait** — nobody has pushed it; a human has to finish that session |
-
-Only `pr` blocks a merge. You cannot race something that was never pushed.
-
-If `gh` cannot answer, `"gh_ok"` is `false` and `"warnings"` says why — an empty
-conflict list then means *"I don't know"*, not *"all clear"*. Read the flag.
-
-### Why it fails open
-
-If the checker cannot reach GitHub, the merge is allowed. Not optimism: the
-merge being guarded is itself a `gh` call against the same API. No GitHub means
-no merge either way, so refusing would block nothing and only produce a
-confusing error.
-
----
+Commands are explicit, user-invoked skills. Project instructions and host
+permissions still apply. The shared push-stage reference lets `/ship` prepare
+work without depending on another automatically invoked command.
 
 ## Install
 
-The installer asks four questions, merges itself into your `settings.json`
-without disturbing hooks you already have, and **proves the guards actually fire
-before it claims success.** The fourth question — the merge gate — is only asked
-if `gh` is on your PATH, since that is what it reads.
+Supports macOS and Linux. Requires **Git and Python 3.9+** on the host's PATH.
+Publishing and merging additionally require authenticated GitHub CLI (`gh`).
+No third-party Python packages are needed.
+
+Clone this repository and run the installer from the checkout:
 
 ```sh
-git clone https://github.com/ShakhzodbekBabakulov/worktree-guard
+git clone https://github.com/ShakhzodbekBabakulov/worktree-guard.git
 cd worktree-guard
-./install.sh
+python3 install.py --host both --scope user
 ```
 
-Prefer not to clone? Download it, read it, then run it:
+Choose `--host claude`, `--host codex`, or `--host both`. Default: Claude, user
+scope. For only one project, provide its existing Git repository root:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ShakhzodbekBabakulov/worktree-guard/main/install.sh -o wg-install.sh
-less wg-install.sh     # ~320 lines of shell. Worth the five minutes.
-bash wg-install.sh
+python3 install.py --host both --scope project --project "/path/to/project"
 ```
 
-There is a `curl … | bash` one-liner and it works, but this is a tool whose whole
-job is to stop software from doing things you didn't sanction. Piping it
-unexamined into your shell would be a funny way to start.
+| Host | Skills relative to scope root | Hook configuration | Helpers |
+| --- | --- | --- | --- |
+| Claude Code | `.claude/skills/{work,push,ship,done}/` | `.claude/settings.json` | `.claude/hooks/` |
+| Codex | `.agents/skills/{work,push,ship,done}/` | `.codex/hooks.json` | `.codex/hooks/` |
 
----
+User scope means your home folder; project scope means the selected repository.
+For project distribution, review and commit the generated settings, helpers and
+skills so new worktrees/clones contain them. An uncommitted project installation
+does not appear automatically in another checkout; install there separately or
+use user scope. Backups and ownership manifests are local installation records,
+not required team runtime files.
 
-## What it does **not** guard
+Use a single scope for these command names to avoid competing definitions from
+user and project installations. The installer checks conflicts in the selected
+scope; it does not remove definitions in another scope or another plugin.
 
-**This is a tripwire, not a sandbox.** Read this part before you rely on it.
-
-It hooks Claude Code's `Edit`, `Write` and `NotebookEdit` tools. It does **not**
-hook `Bash`. An agent that runs `sed -i`, `echo > app.ts`, `git apply`, or a
-script that writes files will go straight through it — and no hook can reliably
-prevent that, because deciding what an arbitrary shell command will write is not
-a solvable problem.
-
-So it does not stop a determined agent, and it is not a security boundary.
-
-What it stops is the thing that actually happens fifty times a week: an agent
-absent-mindedly editing `main` because nothing told it not to. That's a real
-problem, and this really does solve it.
-
-Other limits, stated plainly:
-
-- **macOS and Linux.** It's a bash script. Windows needs Git Bash or WSL.
-- **Claude Code only.** Cursor, Codex and Copilot have entirely different hook
-  contracts. Nothing here ports to them.
-- **It reads `file_path` only.** A tool call that writes somewhere else isn't seen.
-- **It fails open.** If the payload can't be parsed, the edit is allowed. A broken
-  guard should cost you a missed catch, not your ability to work. The installer
-  checks its dependencies and self-tests precisely so a silently-dead hook
-  doesn't survive installation.
-
-And the merge gate has limits of its own, worth stating plainly:
-
-- **It only knows about pull requests and local worktrees.** A collaborator
-  working on another machine who has not pushed is invisible to it.
-- **It compares file paths, not meaning.** Two changes to the same file may not
-  actually conflict, and two changes to different files sometimes do. It errs
-  towards making you look.
-- **It guards `gh pr merge`.** Merging through the GitHub web page, or with
-  `git push` straight to main, goes around it. Same tripwire-not-sandbox rule.
-
----
-
-## Where it applies
-
-| Scope | Lives in | Covers | Notes |
-|---|---|---|---|
-| **This project** | `<repo>/.claude/` | this repo | commit it and your whole team gets the guard |
-| **Every project** | `~/.claude/` | all your repos | just you |
-
-Both work identically across the Claude Code CLI, the desktop app, and the IDE
-extensions — [they all read the same settings files][docs-desktop]. There's no
-separate desktop install.
-
-**One caveat worth knowing:** [Claude Code on the web][docs-web] clones your repo,
-so it runs a project-scoped guard but **not** a global one — `~/.claude/` lives on
-your machine and never reaches the cloud session. If you want web coverage,
-install into the project.
-
-[docs-desktop]: https://code.claude.com/docs/en/desktop
-[docs-web]: https://code.claude.com/docs/en/claude-code-on-the-web
-
----
-
-## Configuration
-
-Re-run `install.sh` any time, or edit the config block at the top of the
-installed `worktree-guard.sh`:
+Replaced files are backed up under the selected host's
+`worktree-guard-backups/`. Unrelated settings and hook handlers are preserved.
+An existing unrelated command or modified owned file stops installation. Review
+the reported collision before explicitly choosing replacement:
 
 ```sh
-# Branches on which source edits are refused. Space-separated.
-PROTECTED_BRANCHES="main"
-
-# listed       → guard only the extensions in CODE_EXTENSIONS
-# all-but-safe → guard everything except the extensions in SAFE_EXTENSIONS
-GUARD_MODE="listed"
-
-CODE_EXTENSIONS="bash c cc cjs cpp cs css go h hpp java js jsx kt kts lua m mjs php py rb rs scss sh sql svelte swift ts tsx vue zsh"
-SAFE_EXTENSIONS="md markdown mdx txt json jsonc yaml yml toml ini cfg conf env lock csv svg png jpg jpeg gif webp ico"
+python3 install.py --host both --scope user --replace-commands
 ```
 
-`all-but-safe` is stricter: anything not on the safe list is code, including
-extension-less files like `Makefile` and `Dockerfile`.
+This choice backs up replaced commands, including legacy Claude command files.
+`install.sh` remains a wrapper for this installer; `install-codex.py` defaults to
+Codex user scope. Downloading a lone installer script is no longer supported:
+the complete checkout supplies the matching helpers and skills.
 
----
+### Configured is different from active
 
-## Requirements
+The installer writes configuration; it cannot prove that an app has loaded it.
+Restart/reload the host and inspect its native hook controls. In Codex, review
+and approve the hook through the native trust flow (`/hooks` in the CLI).
+Changed hook definitions can require approval again. This installer never writes
+trust hashes or bypasses host approval.
 
-- `git`
-- `python3` — the hook uses it to read Claude Code's JSON payload, and the
-  installer uses it to merge `settings.json` safely.
-  On macOS it ships with the Xcode command line tools, which `git` already needs;
-  if you have git, you have it. (`jq` would be the obvious alternative, but it
-  carries no such guarantee.)
-- `bash`
-- `gh` — **only** for the merge gate. Without it the installer does not offer
-  the gate at all; the branch guard needs nothing beyond the three above.
+Run a disposable real-host test: attempt a source edit on the protected default
+branch (must be denied), then the same edit in an isolated feature workspace
+(must be allowed). Codex should also allow an unnamed, linked native worktree.
+Record the actual hook event and result; calling the script directly is a
+separate test. See [verification evidence and remaining checks](docs/verification.md).
 
----
+Official integration contracts: [Codex hooks](https://learn.chatgpt.com/docs/hooks),
+[Codex skills](https://learn.chatgpt.com/docs/build-skills),
+[Claude hooks](https://code.claude.com/docs/en/hooks), and
+[Claude skills](https://code.claude.com/docs/en/skills).
+
+## Guards and boundaries
+
+**Branch guard:** Claude `Edit`, `Write`, and `NotebookEdit`, plus Codex native
+`apply_patch` events, use one policy. Each affected file is checked against its
+own repository, including rename destinations. Source edits on main, master,
+and the recorded remote default branch are refused; planning documents remain
+editable. A detached primary checkout is refused. A registered linked detached
+worktree is allowed, matching [Codex's native model](https://learn.chatgpt.com/docs/environments/git-worktrees).
+If origin exists but its default branch is not recorded locally, named-branch
+source edits stop until `git remote set-head origin --auto` records it. Refresh
+that reference if the repository's default branch changes.
+
+**Merge guard:** supported direct `gh pr merge` calls are checked against their
+actual PR number or branch, including selectors after flags. Use a standalone
+command with the tool working directory set to the target repository. Compound
+merge commands, repository overrides and ambiguous option layouts are refused;
+read-only merge help is allowed. Malformed supported events and incomplete
+GitHub evidence stop guarded actions.
+
+Older overlapping PRs against the same base go first, ordered by PR number.
+`/ship` waits at most 30 minutes, checking every 60 seconds. Overlapping
+unsubmitted local changes stop shipping and identify their workspace; later
+local changes behind a submitted PR are included. Newer submitted PRs remain
+visible but do not block the older one. The checker caps its scan at 99 open
+PRs and verifies complete file lists. Unknown results never mean all-clear.
+
+The read-only checker is also available as `session-conflict-check` or
+`codex-session-conflict-check`, with `--pr NUMBER`. Read `gh_ok`, `warnings`, and
+each conflict's `blocking` field; exit status alone is not an all-clear signal.
+
+This is an agent-workflow tripwire, not a security sandbox. Arbitrary shell file
+writes, other file-writing tools, wrapped/aliased merge commands, direct pushes,
+and web/API merges are outside interception. Unpublished work on other computers
+is invisible. File overlap is conservative and cannot prove semantic conflicts.
+Branch permissions and required GitHub checks remain useful independent controls.
+
+## Cleanup and deployment evidence
+
+Cleanup requires current remote-base evidence and the exact latest feature tip.
+Ordinary merge ancestry is sufficient; squash cleanup additionally requires a
+matching merged PR head and its merge commit on the remote base. Unknown proof,
+new commits, locked workspaces, or unsaved/untracked/ignored files in a folder to
+be deleted stop removal. This includes generated dependency folders: resolve
+them deliberately before retrying. Ignored files in the surviving checkout are
+protected from incoming tracked-file collisions using Git's native options.
+
+Only the selected workspace and branches are removed. The primary folder stays.
+Remote deletion is conditional on the inspected tip; local deletion also checks
+the expected tip. Cleanup can partially succeed, so each completed step is
+printed and later failures preserve what remains. Concurrent filesystem changes
+cannot be made fully atomic with this workflow. `/done` must move the actual
+task away before removal; changing a shell directory is not an app handoff.
+
+Failed required checks stop publishing/merging. Missing checks are disclosed.
+Deployment success needs provider/check evidence identifying the released
+commit plus the project's documented application check. A responding old page
+is insufficient. Projects without deployments report that explicitly. Version
+changes and release notes follow each project's own conventions.
+
+## Configuration and upgrades
+
+Optional `worktree-guard-config.json` beside the installed helpers customizes
+the policy. It is user-owned and is not replaced by installation:
+
+```json
+{
+  "protected_branches": ["release"],
+  "mode": "listed",
+  "code_extensions": ["py", "js", "ts", "tsx", "swift"],
+  "safe_extensions": ["md", "txt", "json", "yaml", "toml"]
+}
+```
+
+Omit extension lists to retain defaults. `listed` guards only source extensions;
+`all-but-safe` guards everything outside the safe list, including extensionless
+files. Built-in protected branches are additive. Malformed configuration blocks
+supported edits instead of silently disabling protection.
+
+The old Claude `worktree-guard.sh` and `ship-guard.sh` entry points remain wrappers
+around the shared policy. Existing shell extension/mode/branch settings remain
+available in the former wrapper. The legacy checker accepts `--no-fetch` but
+never fetches. Its old `--base` override now reports an unsupported/unknown result.
+`SHIP_GUARD_CHECKER` and `BLOCKING_KINDS` overrides are retired: unknown GitHub
+results and local overlap must not silently bypass the shared merge policy.
+
+To upgrade, update this checkout and rerun the same host/scope install command.
+Owned unchanged files update safely; local modifications require an explicit
+replacement choice. Check file integrity afterwards:
+
+```sh
+python3 install.py --host both --scope user --check
+```
+
+`--check` is read-only and does not claim real-host activation. Use the same
+project arguments for project installations, and repeat native smoke tests.
 
 ## Uninstall
 
 ```sh
-rm ~/.claude/hooks/worktree-guard.sh          # or <repo>/.claude/hooks/…
-rm ~/.claude/hooks/ship-guard.sh              # if you installed the merge gate
-rm ~/.claude/hooks/session-conflict-check
+python3 install.py --host both --scope user --uninstall
 ```
 
-Then drop the `worktree-guard` entry from `hooks.PreToolUse` in the matching
-`settings.json`. The installer leaves a `settings.json.worktree-guard-backup`
-from its first run if you'd rather roll back wholesale.
-
----
-
-## How it works
-
-Claude Code sends every tool call to a `PreToolUse` hook as JSON on stdin. This
-one pulls out `tool_input.file_path`, decides whether it's source, asks **that
-file's own repository** which branch it's on, and exits `2` if that branch is
-protected. Exit `2` is Claude Code's "deny" signal, and whatever the hook writes
-to stderr is handed back to the agent as the reason — which is why the message
-above reads like instructions rather than an error.
-
-Asking the *file's* repo rather than the current directory is the important bit.
-It means a worktree correctly reports its own feature branch, and a file outside
-any repo is correctly left alone instead of being judged by whatever repo your
-terminal happens to be sitting in.
-
----
+Use the original scope/project arguments. Uninstall removes unchanged owned
+files/hooks, restores backed-up originals and migrated hook handlers, and
+preserves unrelated settings and modified files. Backups are retained. If an
+owned file was edited or deleted independently, the report identifies it for
+manual inspection; nothing is blindly overwritten. Reload the host afterwards.
 
 ## Tests
 
 ```sh
-./test/selftest.sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s test -p 'test_*.py' -v
+bash test/selftest.sh
 ```
 
-32 assertions, and every axis is tested in **both** directions — that it blocks
-what it should, and that it allows what it should. A suite that only checked
-"does it block?" would pass with flying colours on a hook that blocks
-everything, which is worse than having no hook at all.
-
-The suite also refuses to run if it cannot create its own scratch directory.
-That check exists because it was needed: on a machine where `mktemp -d` was
-denied, several assertions came back green while the directory did not exist —
-a missing stub makes the guard fail open, which reads as a pass. A suite that
-can report passes it did not earn is worse than no suite.
-
----
-
-## License
+Tests use disposable repositories, local bare remotes, temporary installation
+folders, and simulated GitHub responses. They never merge a live PR or delete
+a live remote branch. The shell entry point runs the legacy compatibility tests,
+which are also included in discovery. Real-host evidence is tracked separately.
 
 MIT — see [LICENSE](LICENSE).

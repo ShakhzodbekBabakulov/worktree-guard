@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""Read-only evidence for deciding whether /ship must first run /push."""
+import argparse
+import json
+import os
+from worktree_common import Stop, base_branch, entry, gh_json, git, protected_branches, remote_tip, root
+
+
+def main():
+    argparse.ArgumentParser(description=__doc__).parse_args()
+    here = root(os.getcwd())
+    branch = git(here, 'branch', '--show-current')
+    if not branch:
+        raise Stop('Name the isolated native worktree with worktree-start <name> --adopt before publishing.')
+    base = base_branch(here)
+    if branch in protected_branches(here) | {base}:
+        raise Stop('Use a feature branch; publishing the default branch is refused.')
+    origin = git(here, 'remote', 'get-url', 'origin')
+    repo = gh_json(here, 'repo', 'view', origin, '--json', 'nameWithOwner')['nameWithOwner']
+    prs = gh_json(here, 'pr', 'list', '--repo', repo, '--head', branch, '--state', 'all', '--limit', '100',
+                  '--json', 'number,headRefName,baseRefName,state,headRefOid,isCrossRepository,url')
+    if not isinstance(prs, list) or len(prs) >= 100:
+        raise Stop('Cannot establish complete pull-request history for this branch.')
+    matches = [p for p in prs if p['headRefName'] == branch and p['isCrossRepository'] is False]
+    pr = max(matches, key=lambda p: p['number']) if matches else None
+    if pr and pr['state'] not in ('OPEN', 'CLOSED', 'MERGED'):
+        raise Stop('Unknown pull-request state.')
+    head = git(here, 'rev-parse', 'HEAD')
+    dirty = bool(git(here, 'status', '--porcelain', '--untracked-files=all'))
+    remote = remote_tip(here, branch)
+    state = pr['state'] if pr else 'MISSING'
+    # A closed/merged PR is never silently reopened or reused for later work.
+    needs_push = state in ('OPEN', 'MISSING') and (not pr or dirty or head != remote or head != pr['headRefOid'])
+    print(json.dumps(dict(branch=branch, base=base, head=head, dirty=dirty,
+                         remote_head=remote, pr=pr, state=state, needs_push=needs_push), indent=2))
+
+
+if __name__ == '__main__':
+    entry(main)
