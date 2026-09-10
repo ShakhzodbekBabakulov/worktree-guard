@@ -272,6 +272,34 @@ class InstallerTests(unittest.TestCase):
         self.assertFalse((self.home / '.codex/hooks/codex-guard.py').exists())
         self.assertFalse((self.home / '.codex/worktree-guard-manifest.json').exists())
 
+    def test_modified_hook_refuses_uninstall_before_changing_either_host(self):
+        self.run_install('--host', 'both')
+        path = self.config('codex')
+        original = path.read_text()
+        for change in ('timeout', 'matcher', 'group_metadata', 'event', 'append_arguments', 'prepend_wrapper'):
+            with self.subTest(change=change):
+                data = json.loads(original)
+                group = data['hooks']['PreToolUse'][0]
+                group['hooks'].append({'type': 'command', 'command': 'keep-unrelated-handler'})
+                if change == 'timeout':
+                    group['hooks'][0]['timeout'] = 60
+                elif change == 'matcher':
+                    group['matcher'] = 'Bash'
+                elif change == 'group_metadata':
+                    group['customMetadata'] = 'user edit'
+                elif change == 'append_arguments':
+                    group['hooks'][0]['command'] += ' --custom-option'
+                elif change == 'prepend_wrapper':
+                    group['hooks'][0]['command'] = 'env MY_SETTING=1 ' + group['hooks'][0]['command']
+                else:
+                    data['hooks']['PostToolUse'] = data['hooks'].pop('PreToolUse')
+                path.write_text(json.dumps(data))
+                before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.home.rglob('*') if p.is_file()}
+                result = self.run_install('--host', 'both', '--uninstall', expected=1)
+                self.assertIn('guard hook was modified', result.stderr)
+                after = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.home.rglob('*') if p.is_file()}
+                self.assertEqual(before, after)
+
     def test_missing_original_backup_stops_uninstall_before_removal(self):
         target = self.home / '.agents/skills/work/SKILL.md'
         target.parent.mkdir(parents=True)

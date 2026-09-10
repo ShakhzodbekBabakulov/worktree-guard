@@ -86,6 +86,29 @@ def strip_owned(data, entry):
     data['hooks']['PreToolUse'] = kept
 
 
+def validate_uninstall_hook(data, entry):
+    """Do not remove a runtime still referenced by an externally modified hook."""
+    if not entry:
+        return
+    owned_handler = entry['hooks'][0]
+    owned_metadata = {key: value for key, value in entry.items() if key != 'hooks'}
+    for event, groups in data.get('hooks', {}).items():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get('hooks'), list):
+                continue
+            metadata = {key: value for key, value in group.items() if key != 'hooks'}
+            for handler in group['hooks']:
+                command = handler.get('command') if isinstance(handler, dict) else None
+                # Wrapping the installed invocation or appending arguments still uses
+                # its runtime. Refuse conservatively without interpreting shell code.
+                if isinstance(command, str) and owned_handler['command'] in command:
+                    if event != 'PreToolUse' or metadata != owned_metadata or handler != owned_handler:
+                        raise ValueError('Installed guard hook was modified; uninstall stopped before changing files. '
+                                         'Restore its original hook settings or remove that handler, then retry.')
+
+
 def migrate_legacy(data, root, scope):
     """Recognize only exact old entrypoint argv, never substring matches."""
     names = ('codex-guard.py', 'claude-guard.py', 'worktree-guard.sh', 'ship-guard.sh')
@@ -151,6 +174,8 @@ def prepare(opts, host, base):
     safe_path(base, str(config.relative_to(base)))
     data = read_json(config)
     config_groups(data)
+    if opts.uninstall:
+        validate_uninstall_hook(data, manifest.get('hook'))
     helper_dir = root / 'hooks'
     helper_ref = shlex.quote(str(helper_dir))
     if opts.scope == 'project':
