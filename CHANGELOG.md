@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Provide the same `/work`, `/push`, `/ship`, and `/done` workflow for Claude Code and Codex without an external review-workflow dependency.
+- Add shared Git, overlap, native edit/merge guard, status, and exact-tip cleanup helpers; preserve legacy Claude entry points.
+- Resume existing workspaces/branches and support Codex's linked unnamed worktrees.
+- Include the push stage automatically when shipping work that has no current uploaded review.
+- Refuse unknown merge evidence, older overlapping reviews, and overlapping unfinished local work; preserve ignored files and changed branch tips during cleanup.
+- Add one installer for either/both hosts and user/project scope, explicit conflict replacement, backups, integrity checks, and conservative uninstall.
+- Document native hook trust, workspace handoff, integration boundaries, and separate real-host verification evidence.
+
 ## v0.2.0
 
 **Adds a second guard: `ship-guard`, the merge gate.**

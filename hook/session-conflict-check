@@ -1,221 +1,27 @@
 #!/usr/bin/env python3
-"""session-conflict-check - does this branch collide with another live session?
+"""Legacy read-only report entrypoint; use the same evidence as native guards.
 
-Read-only. Never mutates anything. Always exits 0: the caller decides what a
-conflict means. Prints a JSON report on stdout.
-
-Two kinds of collision are reported:
-
-  "pr"       another OPEN pull request changes a file this branch also changes.
-             You can wait for it: it has been submitted, so it will land.
-
-  "worktree" another local worktree changes a file this branch also changes, and
-             has no open pull request. You cannot wait for it - nobody has
-             submitted it. A human has to finish that session first.
-
-Failure is reported, never swallowed. If `gh` cannot answer, "gh_ok" is false
-and "warnings" says why. A gate that silently finds nothing when it is broken is
-worse than no gate at all.
+Always emits JSON. --no-fetch remains accepted for compatibility: no invocation
+fetches or mutates refs. --base is retired because the actual target PR supplies
+its base; refusing overrides prevents a report against the wrong branch.
 """
-
 import json
 import os
-import subprocess
 import sys
-
-
-def run(args, cwd=None, timeout=60):
-    """Run a command. Returns (ok, output). Never raises."""
-    try:
-        p = subprocess.run(
-            args, cwd=cwd, capture_output=True, text=True, timeout=timeout
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return False, str(exc)
-    if p.returncode != 0:
-        return False, (p.stderr or p.stdout or "").strip()
-    return True, p.stdout
-
-
-def git(args, cwd=None):
-    return run(["git"] + args, cwd=cwd)
-
-
-def repo_root(start):
-    ok, out = git(["rev-parse", "--show-toplevel"], cwd=start)
-    return out.strip() if ok else None
-
-
-def default_base(root):
-    """The branch everything lands on. Ask the remote, then fall back."""
-    ok, out = git(["symbolic-ref", "refs/remotes/origin/HEAD"], cwd=root)
-    if ok and out.strip():
-        return "origin/" + out.strip().rsplit("/", 1)[-1]
-    for candidate in ("origin/main", "origin/master"):
-        ok, _ = git(["rev-parse", "--verify", "--quiet", candidate], cwd=root)
-        if ok:
-            return candidate
-    return "origin/main"
-
-
-def changed_files(base, cwd):
-    """Files this checkout changes against base: committed AND uncommitted."""
-    files = set()
-
-    ok, mb = git(["merge-base", "HEAD", base], cwd=cwd)
-    if ok and mb.strip():
-        ok, out = git(["diff", "--name-only", mb.strip() + "..HEAD"], cwd=cwd)
-        if ok:
-            files.update(f for f in out.splitlines() if f)
-
-    # Uncommitted work counts too - it is about to become a commit.
-    ok, out = git(["status", "--porcelain", "--untracked-files=all"], cwd=cwd)
-    if ok:
-        for line in out.splitlines():
-            if len(line) > 3:
-                # Renames read "old -> new"; both sides matter.
-                for part in line[3:].split(" -> "):
-                    part = part.strip().strip('"')
-                    if part:
-                        files.add(part)
-    return files
-
-
-def current_branch(cwd):
-    ok, out = git(["branch", "--show-current"], cwd=cwd)
-    return out.strip() if ok else ""
-
-
-def open_prs(root, warnings):
-    """Open pull requests with the files they touch. None if gh cannot answer."""
-    ok, out = run(
-        ["gh", "pr", "list", "--state", "open", "--limit", "50",
-         "--json", "number,headRefName,url,title"],
-        cwd=root,
-    )
-    if not ok:
-        warnings.append("gh pr list failed: " + out.strip()[:300])
-        return None
-    try:
-        prs = json.loads(out)
-    except ValueError as exc:
-        warnings.append("gh pr list returned unreadable output: %s" % exc)
-        return None
-
-    for pr in prs:
-        ok, out = run(
-            ["gh", "pr", "view", str(pr["number"]), "--json", "files"], cwd=root
-        )
-        if not ok:
-            warnings.append(
-                "could not read the files of pull request #%s: %s"
-                % (pr["number"], out.strip()[:200])
-            )
-            pr["files"] = None
-            continue
-        try:
-            pr["files"] = [f["path"] for f in json.loads(out).get("files", [])]
-        except (ValueError, KeyError, TypeError) as exc:
-            warnings.append("unreadable file list for #%s: %s" % (pr["number"], exc))
-            pr["files"] = None
-    return prs
-
-
-def other_worktrees(root, here):
-    """Every registered worktree except this one."""
-    ok, out = git(["worktree", "list", "--porcelain"], cwd=root)
-    if not ok:
-        return []
-    trees, current = [], {}
-    for line in out.splitlines() + [""]:
-        if not line.strip():
-            if current.get("path"):
-                trees.append(current)
-            current = {}
-        elif line.startswith("worktree "):
-            current["path"] = line[len("worktree "):]
-        elif line.startswith("branch "):
-            current["branch"] = line[len("branch "):].rsplit("/", 1)[-1]
-        elif line.strip() == "detached":
-            current["branch"] = ""
-    here = os.path.realpath(here)
-    return [t for t in trees if os.path.realpath(t["path"]) != here]
+from workflow_conflicts import report
 
 
 def main():
-    args = sys.argv[1:]
-    base_override = None
-    if "--base" in args:
-        try:
-            base_override = args[args.index("--base") + 1]
-        except IndexError:
-            print(json.dumps({"error": "--base needs a value", "conflicts": []}))
-            return 0
-    no_fetch = "--no-fetch" in args
-
-    start = os.getcwd()
-    root = repo_root(start)
-    if not root:
-        print(json.dumps({"error": "not inside a git repository", "conflicts": []}))
-        return 0
-
-    warnings = []
-    base = base_override or default_base(root)
-
-    if not no_fetch:
-        # Keep the base ref honest without touching the working tree.
-        ok, err = run(["git", "fetch", "--quiet", "origin"], cwd=root, timeout=120)
-        if not ok:
-            warnings.append("could not refresh from origin: " + err.strip()[:200])
-
-    branch = current_branch(start)
-    mine = changed_files(base, start)
-
-    conflicts = []
-    prs = open_prs(root, warnings)
-    gh_ok = prs is not None
-    pr_branches = set()
-
-    for pr in prs or []:
-        pr_branches.add(pr.get("headRefName", ""))
-        if pr.get("headRefName") == branch:
-            continue  # our own request
-        if pr.get("files") is None:
-            continue
-        shared = sorted(mine.intersection(pr["files"]))
-        if shared:
-            conflicts.append({
-                "kind": "pr",
-                "number": pr["number"],
-                "branch": pr.get("headRefName", ""),
-                "title": pr.get("title", ""),
-                "url": pr.get("url", ""),
-                "files": shared,
-            })
-
-    for tree in other_worktrees(root, start):
-        tree_branch = tree.get("branch", "")
-        if tree_branch and tree_branch in pr_branches:
-            continue  # already covered by the pull-request pass above
-        shared = sorted(mine.intersection(changed_files(base, tree["path"])))
-        if shared:
-            conflicts.append({
-                "kind": "worktree",
-                "path": tree["path"],
-                "branch": tree_branch,
-                "files": shared,
-            })
-
-    print(json.dumps({
-        "branch": branch,
-        "base": base,
-        "changed_file_count": len(mine),
-        "gh_ok": gh_ok,
-        "warnings": warnings,
-        "conflicts": conflicts,
-    }, indent=2))
+    args = [arg for arg in sys.argv[1:] if arg != '--no-fetch']
+    if args:
+        result = dict(gh_ok=False, conflicts=[], warnings=[
+            'Unsupported arguments. The selected repository/review determines the base; '
+            'refresh refs explicitly before checking.'])
+    else:
+        result = report(os.getcwd())
+    print(json.dumps(result, indent=2))
     return 0
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     sys.exit(main())

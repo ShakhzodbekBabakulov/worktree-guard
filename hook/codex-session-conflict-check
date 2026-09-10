@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+"""Report overlapping work without fetching, modifying files, or merging."""
+import argparse
+import json
+import os
+from codex_conflicts import report
+
+if __name__ == '__main__':
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--pr', help='review number or branch to inspect, even from main')
+    opts = ap.parse_args()
+    print(json.dumps(report(os.getcwd(), opts.pr), indent=2))
