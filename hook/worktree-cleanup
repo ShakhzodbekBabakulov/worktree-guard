@@ -101,6 +101,13 @@ def main():
     if target and target != primary:
         # Resolve ignored/untracked changes again; Git itself rechecks tracked files.
         clean(target, ignored=True)
+        current = [t for t in trees(destination)
+                   if Path(t['worktree']).resolve() == target]
+        if (len(current) != 1 or current[0].get('branch') != 'refs/heads/' + branch or
+                current[0].get('HEAD') != tip or 'locked' in current[0] or
+                'prunable' in current[0] or git(target, 'branch', '--show-current') != branch or
+                ref(target, 'HEAD') != tip or ref(destination, 'refs/heads/' + branch) != tip):
+            raise Stop('The selected workspace or feature branch changed during cleanup; its folder was preserved.')
         git(destination, 'worktree', 'remove', str(target))
         print('Removed folder: ' + str(target))
     if any(t.get('branch') == 'refs/heads/' + branch for t in trees(destination)):

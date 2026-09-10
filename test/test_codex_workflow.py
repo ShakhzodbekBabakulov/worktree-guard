@@ -342,6 +342,28 @@ print(json.dumps(value))
         self.assertTrue(d['gh_ok'], d)
         self.assertTrue(any(c['kind'] == 'worktree' and c['blocking'] for c in d['conflicts']), d)
 
+    def test_staged_overlap_survives_working_file_restoration(self):
+        self.feature(); self.prs(own_number=7, other_number=12)
+        submitted = self.dir / 'submitted tree'
+        unsubmitted = self.dir / 'unsubmitted tree'
+        self.git('worktree', 'add', '-b', 'feature/other', str(submitted), self.tip)
+        self.git('worktree', 'add', '-b', 'feature/local', str(unsubmitted), 'main')
+        for workspace in (submitted, unsubmitted, self.main):
+            with self.subTest(workspace=workspace.name):
+                path = workspace / 'app.py'
+                original = path.read_bytes()
+                path.write_text('unfinished staged change\n')
+                self.git('add', 'app.py', cwd=workspace)
+                path.write_bytes(original)
+                self.assertEqual(self.git('diff', '--name-only', 'HEAD', cwd=workspace), '')
+                self.assertEqual(self.git('diff', '--cached', '--name-only', cwd=workspace), 'app.py')
+                result = json.loads(self.report('--pr', '7').stdout)
+                self.assertTrue(result['gh_ok'], result)
+                self.assertTrue(any(c['kind'] == 'worktree' and c['blocking'] and
+                                    c['path'] == str(workspace) and 'app.py' in c['files']
+                                    for c in result['conflicts']), result)
+                self.git('reset', 'HEAD', '--', 'app.py', cwd=workspace)
+
     def test_status_detects_missing_review_dirty_and_unpushed_work(self):
         self.feature()
         script = HOOK / 'workflow-status'
@@ -429,6 +451,48 @@ print(json.dumps(value))
         self.assertEqual(self.guard(patch).returncode, 2)
         self.git('switch', '-c', 'feature/safe')
         self.assertEqual(self.guard(patch).returncode, 0)
+
+    def cleanup_with_concurrent_change(self, action):
+        self.feature(); self.merge()
+        driver = self.dir / 'concurrent_cleanup.py'
+        driver.write_text("""import runpy, sys
+sys.path.insert(0, sys.argv[1])
+import worktree_common as common
+original = common.git
+folder, action = sys.argv[2:4]
+changed = False
+def git(cwd, *args):
+    global changed
+    result = original(cwd, *args)
+    if args[:2] == ('merge', '--no-overwrite-ignore') and not changed:
+        changed = True
+        if action == 'switch':
+            original(folder, 'switch', '-c', 'feature/other-task')
+        else:
+            original(folder, 'commit', '--allow-empty', '-m', 'new task work')
+    return result
+common.git = git
+sys.argv = ['worktree-cleanup', '--worktree', folder]
+runpy.run_path(sys.path[0] + '/worktree-cleanup', run_name='__main__')
+""")
+        result = self.run_cmd(['python3', str(driver), str(HOOK), str(self.tree), action], check=False)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.tree.is_dir())
+        self.assertTrue(self.git('branch', '--list', self.branch))
+        self.assertIn('Updated default checkout.', result.stdout)
+        self.assertNotIn('Removed folder:', result.stdout)
+        self.assertNotIn('Verified cleanup.', result.stdout)
+        return result
+
+    def test_cleanup_preserves_workspace_switched_during_cleanup(self):
+        result = self.cleanup_with_concurrent_change('switch')
+        self.assertIn('changed during cleanup', result.stderr)
+        self.assertEqual(self.git('branch', '--show-current', cwd=self.tree), 'feature/other-task')
+
+    def test_cleanup_preserves_new_commit_during_cleanup(self):
+        result = self.cleanup_with_concurrent_change('commit')
+        self.assertIn('changed during cleanup', result.stderr)
+        self.assertNotEqual(self.git('rev-parse', 'HEAD', cwd=self.tree), self.tip)
 
     def test_cleanup_preserves_ignored_collision_in_surviving_main(self):
         self.feature()

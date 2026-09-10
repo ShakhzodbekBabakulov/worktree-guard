@@ -22,6 +22,7 @@ def local_files(cwd, base):
     for args in [
         ['diff', '--name-only', '--no-renames', '-z', mb, 'HEAD'],
         ['diff', '--name-only', '--no-renames', '-z', 'HEAD'],
+        ['diff', '--cached', '--name-only', '--no-renames', '-z', 'HEAD'],
         ['ls-files', '--others', '--exclude-standard', '-z'],
     ]:
         files.update(x for x in run(['git', *args], cwd).stdout.split('\0') if x)
@@ -71,6 +72,8 @@ def report(cwd, selector=None):
                 # local edits/commits are not. Do not hide them behind its name.
                 baseline = submitted[name]['headRefOid'] if name in submitted else 'refs/remotes/origin/' + base
                 pending = set(x for x in run(['git', 'diff', '--name-only', '--no-renames', '-z', baseline], path).stdout.split('\0') if x)
+                # The index can retain edits even when working files match HEAD.
+                pending.update(x for x in run(['git', 'diff', '--cached', '--name-only', '--no-renames', '-z', 'HEAD'], path).stdout.split('\0') if x)
                 pending.update(x for x in run(['git', 'ls-files', '--others', '--exclude-standard', '-z'], path).stdout.split('\0') if x)
             else:
                 pending = local_files(path, base)
