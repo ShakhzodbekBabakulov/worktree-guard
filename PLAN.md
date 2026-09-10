@@ -1,7 +1,7 @@
 # One worktree workflow for Claude and Codex
 
 ## Approved goal
-Provide /work → /push → /ship → /done for Claude Code and Codex, without gstack or personal-project dependencies. Preserve existing unfinished work. After implementation and verification, follow the authorized /push and /ship delivery stages; required unresolved checks still block release.
+Provide /work → /push → /ship → /done for Claude Code and Codex, without gstack or personal-project dependencies. Preserve existing unfinished work. After implementation and verification, follow the authorized /push and /ship delivery stages; failed required project checks still block release. The user subsequently took responsibility for Claude installation/live validation and authorized publication, merging, finished-work cleanup and other proven-stale branch/worktree cleanup.
 
 ## Commands
 - /work <name>: resume a matching worktree or existing branch first; otherwise create isolated work from the current remote default. Prefer native host workspace transitions and verify actual cwd. Preserve unsaved work and follow project dependency setup.
@@ -31,9 +31,12 @@ Provide /work → /push → /ship → /done for Claude Code and Codex, without g
 - Deliver review-ready changes; publishing follows /push and /ship separately.
 
 ## Progress
-- Approved plan saved; original repair notes preserved in docs/prior-codex-repair.md.
+- Approved plan saved; original repair notes preserved in docs/prior-codex-repair.md. Before deleting the feature workspace, archive these notes and the older primary-checkout planning document outside it, verify identical bytes, and preserve the archive.
 
 - Shared helpers, four commands, unified installer, compatibility wrappers and documentation implemented. Review findings received regression tests and fixes.
 - Real-host smoke checks attempted separately; activation/account limitations are recorded in docs/verification.md.
 
-- 68 automated cases pass; Codex native protected, named-feature and linked-unnamed edit smoke checks pass. Claude native delivery remains blocked by account access. Publishing is pending this required check; shipping additionally identifies an existing unsaved primary-checkout plan overlap. Existing plans/workspaces remain preserved.
+- 72 automated cases pass; Codex native protected, named-feature and linked-unnamed edit smoke checks pass. Claude native delivery was blocked by account access and is now explicitly a user-owned follow-up, not a claimed pass.
+- Publication and cleanup are authorized and pending. Safely archive the existing planning notes, recheck overlap, then publish and merge the exact checked feature head. Only remove branches/worktrees after proving their latest work merged and preserving local files. Record partial cleanup honestly; uncertain or active work stays in place.
+
+- Shipping review fixed staged-index overlap omissions, selected-workspace changes during cleanup, and modified-hook uninstall. Added regression coverage for these safety cases. The primary original plan is preserved in a checksum-verified local archive.

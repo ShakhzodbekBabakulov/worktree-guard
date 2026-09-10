@@ -6,9 +6,8 @@ Claude Code 2.1.263, Codex CLI 0.153.4.
 ## Automated behavior
 
 `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s test -p 'test_*.py' -q`
-passed **68 tests**. The 14 legacy compatibility cases are included in this
-count and also run through `bash test/selftest.sh`. All 34 core cases also passed after refreshing default-branch metadata in the
-workspace helper.
+passed **72 tests**. The 14 legacy compatibility cases are included in this
+count and also run through `bash test/selftest.sh`. The suite includes 37 core, 21 installer and 14 legacy cases.
 
 Coverage includes temporary user/project installs for either/both hosts,
 repeat installations and upgrades, legacy command collisions, unrelated
@@ -26,7 +25,10 @@ read-only help, and quoted documentation examples have regression coverage.
 
 Code review found and fixed ignored-file overwrites, actual-target selection,
 invoking-workspace overlap, newline parsing, unknown-default protection and
-help-command false denials. Installer review fixes cover preservation of
+help-command false denials. The shipping review additionally fixed staged-index
+overlap omissions, workspace identity changes during cleanup, and uninstall
+leaving modified hooks behind after removing their runtime. Regression cases
+cover all three, including failure after remote-branch deletion. Installer review fixes cover preservation of
 identical preexisting files, backup symlink safety and deleted settings during
 uninstall.
 
@@ -84,15 +86,18 @@ in, but the model request failed before a Write event with HTTP 403,
 `oauth_org_not_allowed`: the organization has disabled subscription access to
 Claude Code. No source file was created.
 
-**Blocked, not passed:** actual Claude deny/allow delivery still needs an
-account permitted to run Claude Code. Direct adapter and legacy-wrapper tests
-do not substitute for this gate. Do not claim the Claude app integration has
-been verified active from this run. No credentials belong in this repository.
+**Not passed; user-owned follow-up:** actual Claude deny/allow delivery still
+needs an account permitted to run Claude Code. The user explicitly chose to
+install and validate Claude themselves and authorized publishing and cleanup
+without waiting for that host test. Direct adapter and legacy-wrapper tests
+do not prove Claude activation. No credentials belong in this repository.
 
-## Release gate
+## Verification limits
 
-Before claiming both-host verification, rerun real Claude protected/isolated
-edit tests with permitted access. Native desktop workspace handoff and cleanup,
+Before claiming both-host verification, the user must complete real Claude
+protected/isolated edit tests with permitted access. This remains an unverified
+host claim, not a publication blocker after the user’s explicit scope change.
+Native desktop workspace handoff and cleanup,
 full command publication scenarios, Linux execution, and Python 3.9 runtime
 coverage remain explicit unverified areas. No application deployment is
 configured in this repository, and no deployment success is claimed.
@@ -103,10 +108,14 @@ The real repository status helper reported a missing pull request and
 `needs_push: true`, as expected for unpublished work. GitHub access is available.
 The real conflict checker returned `gh_ok: true` and identified an overlapping
 untracked `PLAN.md` in the primary main checkout. That older planning document
-was preserved unchanged. This is an actual local-work blocker for `/ship`, not
-a GitHub failure or an older-PR wait.
+was moved into a local archive under the surviving primary repository’s Git
+metadata and verified byte for byte. The original repair notes will be archived
+there before removing their workspace. This resolves the planning-document
+overlap without discarding it; shipping still performs a fresh conflict check.
 
-Implementation is saved in the existing repair workspace. Publishing and
-merging remain pending the required Claude host verification; shipping also
-requires resolution of the overlapping primary-checkout document. No release,
-tag, deployment or worktree cleanup is claimed by this change.
+Implementation is saved in the existing repair workspace. The user authorized
+publishing, merging, finished-work cleanup and removal of other proven-stale
+branches/worktrees. Claude installation and live validation are user-owned.
+Publication and cleanup are pending in this record; their eventual results
+must be verified independently. No release, tag, deployment or completed
+cleanup is claimed by these documentation changes.
